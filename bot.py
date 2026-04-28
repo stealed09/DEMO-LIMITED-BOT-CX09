@@ -1,8 +1,8 @@
-import json, os
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import json, os, time
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-# ---------- CONFIG ----------
+# ---------- LOAD CONFIG ----------
 with open("config.json") as f:
     config = json.load(f)
 
@@ -23,11 +23,9 @@ def save_users(data):
     with open("users.json", "w") as f:
         json.dump(data, f, indent=4)
 
-app = Client("bot", bot_token=BOT_TOKEN)
-
 # ---------- START ----------
-START_TEXT = """
-✨ Thank you for reaching out!
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = """✨ Thank you for reaching out!
 
 🤖 You are now connected to our support system.
 Please send your message, and admin will reply soon.
@@ -36,92 +34,115 @@ Please send your message, and admin will reply soon.
 
 🚀 Developed by @TALK_WITH_STEALED
 """
-
-start_btn = InlineKeyboardMarkup([
-    [InlineKeyboardButton("📩 Send Message", callback_data="send")]
-])
-
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    await message.reply_text(START_TEXT, reply_markup=start_btn)
+    btn = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📩 Send Message", callback_data="send")]
+    ])
+    await update.message.reply_text(text, reply_markup=btn)
 
 # ---------- BUTTON ----------
-@app.on_callback_query(filters.regex("send"))
-async def send_msg(client, callback):
-    await callback.message.reply_text("📩 Send your message now")
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-# ---------- MESSAGE ----------
-@app.on_message(filters.private & ~filters.command("start"))
-async def handle_msg(client, message):
-    user_id = str(message.from_user.id)
-    name = message.from_user.first_name
-    username = message.from_user.username or "no_username"
+    if query.data == "send":
+        await query.message.reply_text("📩 Send your message now")
+
+    elif query.data.startswith("reply_"):
+        uid = query.data.split("_")[1]
+        context.user_data["reply_to"] = uid
+        await query.message.reply_text("✍️ Send reply now")
+
+# ---------- USER MESSAGE ----------
+async def user_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ADMIN_ID:
+        return
+
+    user = update.effective_user
+    uid = str(user.id)
 
     users = load_users()
 
-    if user_id not in users:
-        users[user_id] = {
-            "name": name,
-            "username": username,
+    if uid not in users:
+        users[uid] = {
+            "name": user.first_name,
+            "username": user.username or "no_username",
             "log_msg_id": None,
             "messages": []
         }
 
-    users[user_id]["messages"].append(f"📩 {message.text}")
+    users[uid]["messages"].append(f"📩 {update.message.text}")
 
-    text = f"👤 {name} (@{username})\n🆔 {user_id}\n\n"
-    for m in users[user_id]["messages"]:
+    # -------- LOG CHANNEL --------
+    text = f"👤 {users[uid]['name']} (@{users[uid]['username']})\n🆔 {uid}\n\n"
+    for m in users[uid]["messages"]:
         text += m + "\n"
 
-    if users[user_id]["log_msg_id"] is None:
-        msg = await app.send_message(LOG_CHANNEL, text)
-        users[user_id]["log_msg_id"] = msg.id
+    if users[uid]["log_msg_id"] is None:
+        msg = await context.bot.send_message(LOG_CHANNEL, text)
+        users[uid]["log_msg_id"] = msg.message_id
     else:
         try:
-            await app.edit_message_text(LOG_CHANNEL, users[user_id]["log_msg_id"], text)
+            await context.bot.edit_message_text(
+                chat_id=LOG_CHANNEL,
+                message_id=users[uid]["log_msg_id"],
+                text=text
+            )
         except:
             pass
 
     save_users(users)
 
+    # -------- SEND TO ADMIN --------
     btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Reply", callback_data=f"reply_{user_id}")]
+        [InlineKeyboardButton("Reply", callback_data=f"reply_{uid}")]
     ])
 
-    await app.send_message(
-        ADMIN_ID,
-        f"📩 {name} (@{username})\nID: {user_id}\n\n{message.text}",
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"📩 {user.first_name} (@{user.username})\nID: {uid}\n\n{update.message.text}",
         reply_markup=btn
     )
 
 # ---------- ADMIN REPLY ----------
-reply_mode = {}
+async def admin_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
 
-@app.on_callback_query(filters.regex("reply_"))
-async def reply_user(client, callback):
-    uid = callback.data.split("_")[1]
-    reply_mode[callback.from_user.id] = uid
-    await callback.message.reply_text("✍️ Send reply")
+    if "reply_to" not in context.user_data:
+        return
 
-@app.on_message(filters.private & filters.user(ADMIN_ID))
-async def admin_reply(client, message):
-    if message.from_user.id in reply_mode:
-        uid = reply_mode[message.from_user.id]
+    uid = context.user_data["reply_to"]
 
-        await app.send_message(int(uid), f"🤖 Admin:\n{message.text}")
+    await context.bot.send_message(
+        chat_id=int(uid),
+        text=f"🤖 Admin:\n{update.message.text}"
+    )
 
-        users = load_users()
-        users[uid]["messages"].append(f"🤖 {message.text}")
+    users = load_users()
+    users[uid]["messages"].append(f"🤖 {update.message.text}")
 
-        text = f"👤 {users[uid]['name']} (@{users[uid]['username']})\n🆔 {uid}\n\n"
-        for m in users[uid]["messages"]:
-            text += m + "\n"
+    text = f"👤 {users[uid]['name']} (@{users[uid]['username']})\n🆔 {uid}\n\n"
+    for m in users[uid]["messages"]:
+        text += m + "\n"
 
-        try:
-            await app.edit_message_text(LOG_CHANNEL, users[uid]["log_msg_id"], text)
-        except:
-            pass
+    try:
+        await context.bot.edit_message_text(
+            chat_id=LOG_CHANNEL,
+            message_id=users[uid]["log_msg_id"],
+            text=text
+        )
+    except:
+        pass
 
-        save_users(users)
+    save_users(users)
 
-app.run()
+# ---------- MAIN ----------
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(buttons))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, user_msg))
+app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), admin_msg))
+
+print("Bot running...")
+app.run_polling()
